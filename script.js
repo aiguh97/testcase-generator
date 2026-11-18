@@ -88,7 +88,7 @@ async function tryLLMGeneration(requirement, categories) {
  * Return a domain tag based on keywords found in the requirement.
  * Domains map directly to rule-based template sets.
  * @param {string} text
- * @returns {string}  One of: 'division'|'math'|'login'|'form'|'api'|'generic'
+ * @returns {string}
  */
 function detectDomain(text) {
   const t = text.toLowerCase();
@@ -102,9 +102,29 @@ function detectDomain(text) {
     return 'math';
   }
 
+  // Password reset / forgot password (before generic login check)
+  if (/(forgot\s*password|reset\s*password|password\s*reset|password\s*recovery)/.test(t)) {
+    return 'passwordReset';
+  }
+
   // Authentication / login
   if (/(log\s?in|sign\s?in|authenticate|password|email.*login|login.*email)/.test(t)) {
     return 'login';
+  }
+
+  // File upload / attachment
+  if (/(upload|file\s*upload|attach|attachment|import\s*file|choose\s*file)/.test(t)) {
+    return 'upload';
+  }
+
+  // Search / filter / query
+  if (/(search|filter|query|find\s+\w|look\s*up|lookup)/.test(t)) {
+    return 'search';
+  }
+
+  // Payment / checkout / order
+  if (/(payment|checkout|purchase|order|cart|billing|credit\s*card|debit\s*card|invoice)/.test(t)) {
+    return 'payment';
   }
 
   // Form / registration / input validation
@@ -121,15 +141,178 @@ function detectDomain(text) {
 }
 
 // ============================================================
+// Language detection — Python vs JavaScript vs natural language
+// ============================================================
+
+/**
+ * Detect the programming language (or absence of one) in the input.
+ *
+ * Returns:
+ *  'python'     — Python source code detected
+ *  'javascript' — JavaScript / TypeScript source code detected
+ *  'natural'    — natural-language requirement (no code detected)
+ *
+ * @param {string} text
+ * @returns {'python'|'javascript'|'natural'}
+ */
+function detectLanguage(text) {
+  const t = text.trim();
+
+  // ---- Python signals -------------------------------------------------
+  // def keyword, Python-style None/True/False literals, indentation with
+  // colons, common stdlib imports, type hints (a: int), print(), f-strings
+  const pythonScore = (
+    (/\bdef\s+\w+\s*\(/.test(t)         ? 4 : 0) +   // def func():
+    (/:\s*\n/.test(t)                    ? 2 : 0) +   // block colon + newline
+    (/\bNone\b/.test(t)                  ? 1 : 0) +
+    (/\bTrue\b|\bFalse\b/.test(t)        ? 1 : 0) +
+    (/\bimport\s+\w/.test(t)             ? 1 : 0) +
+    (/\bprint\s*\(/.test(t)              ? 1 : 0) +
+    (/\bself\b/.test(t)                  ? 2 : 0) +
+    (/f['"]/.test(t)                     ? 1 : 0) +   // f-string
+    (/\bexcept\b/.test(t)                ? 1 : 0) +
+    (/\belif\b/.test(t)                  ? 2 : 0) +
+    (/->/.test(t)                        ? 1 : 0) +   // return type hint
+    (/#/.test(t)                         ? 1 : 0)     // Python comment style
+  );
+
+  // ---- JavaScript / TypeScript signals --------------------------------
+  const jsScore = (
+    (/\bfunction\s+\w+\s*\(/.test(t)     ? 4 : 0) +
+    (/\bconst\b|\blet\b|\bvar\b/.test(t) ? 3 : 0) +
+    (/=>/.test(t)                        ? 2 : 0) +   // arrow function
+    (/\bconsole\./.test(t)               ? 2 : 0) +
+    (/\bnull\b/.test(t)                  ? 1 : 0) +
+    (/\bundefined\b/.test(t)             ? 1 : 0) +
+    (/\bNaN\b|\bInfinity\b/.test(t)      ? 1 : 0) +
+    (/===|!==/.test(t)                   ? 2 : 0) +   // strict equality
+    (/\bthrow\s+new\s+/.test(t)          ? 1 : 0) +
+    (/\bPromise\b|\basync\b|\bawait\b/.test(t) ? 2 : 0) +
+    (/\/\//.test(t)                      ? 1 : 0)     // JS-style comment
+  );
+
+  if (pythonScore === 0 && jsScore === 0) return 'natural';
+  if (pythonScore >= jsScore)             return 'python';
+  return 'javascript';
+}
+
+// ============================================================
+// Requirement parser — extract concrete terms for use in templates
+// ============================================================
+
+/**
+ * Parse a free-text requirement and return concrete terminology
+ * that templates can use in place of generic placeholder phrases.
+ *
+ * Returns an object with:
+ *  - action     : primary verb phrase  (e.g. "log in", "submit", "search")
+ *  - subject    : acting entity        (e.g. "user", "admin", "customer")
+ *  - fields     : array of field names found (e.g. ["email", "password"])
+ *  - feature    : short feature label  (e.g. "Login", "Product Search")
+ *  - featureFull: full (truncated) requirement string for use in scenario text
+ *
+ * @param {string} req
+ * @returns {{ action:string, subject:string, fields:string[], feature:string, featureFull:string }}
+ */
+function parseRequirement(req) {
+  const t   = req.toLowerCase();
+  const raw = req.trim().replace(/["""]/g, '"');
+
+  // ---- Subject / actor ------------------------------------------------
+  let subject = 'user';
+  if (/\badmin\b/.test(t))      subject = 'admin';
+  else if (/\bcustomer\b/.test(t)) subject = 'customer';
+  else if (/\bmember\b/.test(t))   subject = 'member';
+  else if (/\bguest\b/.test(t))    subject = 'guest';
+
+  // ---- Action verb phrase ---------------------------------------------
+  let action = 'use the feature';
+  const actionPatterns = [
+    [/(log\s?in|sign\s?in)/,              'log in'],
+    [/\blog\s?out\b/,                     'log out'],
+    [/\bregister\b|\bsign\s?up\b/,        'register'],
+    [/\bsubmit\b/,                        'submit'],
+    [/\bsearch\b/,                        'search'],
+    [/\bfilter\b/,                        'filter'],
+    [/\bupload\b/,                        'upload'],
+    [/\bdownload\b/,                      'download'],
+    [/\bdelete\b|\bremove\b/,             'delete'],
+    [/\bedit\b|\bupdate\b|\bmodify\b/,    'update'],
+    [/\bcreate\b|\badd\b/,                'create'],
+    [/\bview\b|\bsee\b|\bdisplay\b/,      'view'],
+    [/\bcheckout\b|\bpurchase\b|\border\b/, 'purchase'],
+    [/\breset\b/,                         'reset'],
+    [/\bverif/,                           'verify'],
+    [/\bcancel\b/,                        'cancel'],
+    [/\bbook\b|\breserv/,                 'book'],
+  ];
+  for (const [pattern, verb] of actionPatterns) {
+    if (pattern.test(t)) { action = verb; break; }
+  }
+
+  // ---- Fields ---------------------------------------------------------
+  const fieldPatterns = [
+    'email', 'password', 'username', 'phone', 'mobile', 'address',
+    'name', 'first name', 'last name', 'date of birth', 'dob',
+    'credit card', 'card number', 'cvv', 'expiry', 'zip', 'postal',
+    'file', 'attachment', 'image', 'document',
+    'query', 'keyword', 'search term',
+    'title', 'description', 'category', 'price', 'quantity', 'amount',
+    'token', 'otp', 'code', 'pin',
+    'url', 'link', 'id',
+  ];
+  const fields = fieldPatterns.filter(f => t.includes(f));
+
+  // ---- Feature label --------------------------------------------------
+  // Try to build a short label from the action + first detected nouns.
+  let feature = action.replace(/\b\w/g, c => c.toUpperCase()); // e.g. "Log In"
+  if (fields.length > 0) {
+    // Capitalise field names for label
+    const fLabel = fields.slice(0, 2).map(f => f.replace(/\b\w/g, c => c.toUpperCase())).join(' & ');
+    // Only append field label if it isn't already implied by action
+    if (!feature.toLowerCase().includes(fields[0])) {
+      feature = `${feature} (${fLabel})`;
+    }
+  }
+
+  const featureFull = raw.length > 80 ? raw.slice(0, 77) + '…' : raw;
+
+  return { action, subject, fields, feature, featureFull };
+}
+
+// ============================================================
 // Rule-based template sets (domain-specific)
 // ============================================================
 
 /**
- * Builds a test-case object for the division / bagi domain.
+ * Builds test cases for the division / bagi domain.
  * @param {string[]} categories
+ * @param {'python'|'javascript'|'natural'} lang
  * @returns {object[]}
  */
-function divisionTestCases(categories) {
+function divisionTestCases(categories, lang) {
+  const isPy = lang !== 'javascript';   // python or natural → Python-style
+  const isJs = lang === 'javascript';
+
+  // Language-specific vocabulary
+  const nullVal    = isPy ? 'None'                : 'null';
+  const divByZero  = isPy ? 'Raises ZeroDivisionError: division by zero'
+                          : 'Returns Infinity (integer denominator) or NaN (0.0/0.0)';
+  const divByZeroF = isPy ? 'Raises ZeroDivisionError: float division by zero'
+                          : 'Returns Infinity';
+  const typeErr    = isPy ? 'Raises TypeError; operation does not proceed'
+                          : 'Returns NaN (JS coerces strings); or throws TypeError in strict mode';
+  const nullErr    = isPy ? `Raises TypeError: unsupported operand type(s) for /: '${nullVal}' and 'int'`
+                          : 'Returns NaN; no exception thrown (JS coerces null to 0)';
+  const maxInt     = isPy ? 'a = sys.maxsize, b = sys.maxsize'
+                          : 'a = Number.MAX_SAFE_INTEGER, b = Number.MAX_SAFE_INTEGER';
+  const maxIntExp  = isPy ? 'Returns 1.0 without overflow (Python int is arbitrary precision)'
+                          : 'Returns 1; no overflow (floats used internally)';
+  const minFloat   = isPy ? 'a = 1, b = sys.float_info.min'
+                          : 'a = 1, b = Number.MIN_VALUE';
+  const minFloatEx = isPy ? 'Returns a very large float; no exception raised'
+                          : 'Returns Infinity (1 / MIN_VALUE overflows to Infinity)';
+
   const cases = [];
 
   if (categories.includes('Functional')) {
@@ -138,31 +321,31 @@ function divisionTestCases(categories) {
         id: 'TC-F001', type: 'Functional', priority: 'High',
         scenario:  'Divide two positive integers',
         input:     'a = 10, b = 2',
-        expected:  'Returns 5.0',
+        expected:  isPy ? 'Returns 5.0 (Python 3 true division)' : 'Returns 5',
       },
       {
         id: 'TC-F002', type: 'Functional', priority: 'High',
         scenario:  'Divide a positive number by a negative number',
         input:     'a = 10, b = -2',
-        expected:  'Returns -5.0',
+        expected:  isPy ? 'Returns -5.0' : 'Returns -5',
       },
       {
         id: 'TC-F003', type: 'Functional', priority: 'Medium',
         scenario:  'Divide two negative numbers',
         input:     'a = -9, b = -3',
-        expected:  'Returns 3.0',
+        expected:  isPy ? 'Returns 3.0' : 'Returns 3',
       },
       {
         id: 'TC-F004', type: 'Functional', priority: 'Medium',
         scenario:  'Numerator is zero',
         input:     'a = 0, b = 5',
-        expected:  'Returns 0.0',
+        expected:  isPy ? 'Returns 0.0' : 'Returns 0',
       },
       {
         id: 'TC-F005', type: 'Functional', priority: 'High',
         scenario:  'Result is a non-integer (floating-point)',
         input:     'a = 7, b = 2',
-        expected:  'Returns 3.5',
+        expected:  isPy ? 'Returns 3.5' : 'Returns 3.5',
       },
     );
   }
@@ -173,31 +356,31 @@ function divisionTestCases(categories) {
         id: 'TC-N001', type: 'Negative', priority: 'High',
         scenario:  'Divide by zero — integer denominator',
         input:     'a = 10, b = 0',
-        expected:  'Raises ZeroDivisionError (Python) or returns Infinity/NaN (JS)',
+        expected:  divByZero,
       },
       {
         id: 'TC-N002', type: 'Negative', priority: 'High',
         scenario:  'Divide by zero — float denominator',
         input:     'a = 5.0, b = 0.0',
-        expected:  'Raises ZeroDivisionError (Python) or returns Infinity (JS)',
+        expected:  divByZeroF,
       },
       {
         id: 'TC-N003', type: 'Negative', priority: 'High',
         scenario:  'Non-numeric string passed as numerator',
-        input:     'a = "ten", b = 2',
-        expected:  'Raises TypeError; operation does not proceed',
+        input:     isPy ? 'a = "ten", b = 2' : 'a = "ten", b = 2',
+        expected:  typeErr,
       },
       {
         id: 'TC-N004', type: 'Negative', priority: 'High',
         scenario:  'Non-numeric string passed as denominator',
         input:     'a = 10, b = "two"',
-        expected:  'Raises TypeError; operation does not proceed',
+        expected:  typeErr,
       },
       {
         id: 'TC-N005', type: 'Negative', priority: 'Medium',
-        scenario:  'None / null passed as an argument',
-        input:     'a = None, b = 2',
-        expected:  'Raises TypeError; operation does not proceed',
+        scenario:  `${nullVal} passed as an argument`,
+        input:     `a = ${nullVal}, b = 2`,
+        expected:  nullErr,
       },
     );
   }
@@ -207,32 +390,33 @@ function divisionTestCases(categories) {
       {
         id: 'TC-B001', type: 'Boundary', priority: 'High',
         scenario:  'Denominator is the smallest positive float',
-        input:     'a = 1, b = 5e-324 (or sys.float_info.min)',
-        expected:  'Returns a very large float or Inf without crashing',
+        input:     minFloat,
+        expected:  minFloatEx,
       },
       {
         id: 'TC-B002', type: 'Boundary', priority: 'Medium',
-        scenario:  'Both arguments are the maximum integer / float',
-        input:     'a = sys.maxsize, b = sys.maxsize',
-        expected:  'Returns 1.0 without overflow',
+        scenario:  'Both arguments are the maximum integer value',
+        input:     maxInt,
+        expected:  maxIntExp,
       },
       {
         id: 'TC-B003', type: 'Boundary', priority: 'Medium',
         scenario:  'Both arguments are -1',
         input:     'a = -1, b = -1',
-        expected:  'Returns 1.0',
+        expected:  isPy ? 'Returns 1.0' : 'Returns 1',
       },
       {
         id: 'TC-B004', type: 'Boundary', priority: 'Low',
         scenario:  'Denominator is 1 (identity)',
         input:     'a = 42, b = 1',
-        expected:  'Returns 42.0 (same as numerator)',
+        expected:  isPy ? 'Returns 42.0 (same as numerator)' : 'Returns 42',
       },
       {
         id: 'TC-B005', type: 'Boundary', priority: 'Low',
-        scenario:  'Numerator is 0, denominator is 0',
+        scenario:  'Numerator is 0, denominator is 0 (indeterminate)',
         input:     'a = 0, b = 0',
-        expected:  'Raises ZeroDivisionError (indeterminate form)',
+        expected:  isPy ? 'Raises ZeroDivisionError: division by zero (indeterminate form)'
+                        : 'Returns NaN (0/0 in JS)',
       },
     );
   }
@@ -244,31 +428,55 @@ function divisionTestCases(categories) {
  * Builds test cases for general arithmetic / math functions.
  * @param {string}   req
  * @param {string[]} categories
+ * @param {'python'|'javascript'|'natural'} lang
  * @returns {object[]}
  */
-function mathTestCases(req, categories) {
-  const label = deriveFeatureLabel(req);
+function mathTestCases(req, categories, lang) {
+  const { action, feature, featureFull } = parseRequirement(req);
+  const fnName = (() => {
+    const m = req.match(/(?:def|function)\s+(\w+)/i);
+    return m ? `${m[1]}()` : feature;
+  })();
+
+  const isPy = lang !== 'javascript';
+  const isJs = lang === 'javascript';
+
+  const nullVal   = isPy ? 'None'                       : 'null';
+  const typeErr   = isPy ? 'Raises TypeError; operation does not proceed'
+                         : 'Returns NaN (JS coerces the value); throws in strict/typed code';
+  const nullErr   = isPy ? `Raises TypeError: unsupported operand; None is not a number`
+                         : 'Returns NaN; JS coerces null to 0 — verify intentional behaviour';
+  const argErr    = isPy ? 'Raises TypeError: missing or unexpected positional argument'
+                         : 'Throws TypeError: wrong number of arguments';
+  const maxInt    = isPy ? 'a=sys.maxsize, b=1'         : 'a=Number.MAX_SAFE_INTEGER, b=1';
+  const maxIntExp = isPy ? `${fnName} returns result without overflow (Python int is arbitrary precision)`
+                         : `${fnName} returns result; verify no silent precision loss beyond MAX_SAFE_INTEGER`;
+  const minFlt    = isPy ? 'a=sys.float_info.min, b=1'  : 'a=Number.MIN_VALUE, b=1';
+  const minFltExp = isPy ? `${fnName} returns result without underflow to zero`
+                         : `${fnName} returns result; verify no underflow to 0`;
+
   const cases = [];
 
   if (categories.includes('Functional')) {
     cases.push(
       {
         id: 'TC-F001', type: 'Functional', priority: 'High',
-        scenario:  `${label} — typical positive inputs`,
-        input:     'Two representative positive numbers',
-        expected:  'Returns the mathematically correct result',
+        scenario:  `${fnName} — two positive integer inputs`,
+        input:     'Two representative positive integers (e.g., a=6, b=3)',
+        expected:  `${fnName} returns the mathematically correct result`,
       },
       {
         id: 'TC-F002', type: 'Functional', priority: 'High',
-        scenario:  `${label} — mixed positive and negative inputs`,
-        input:     'One positive, one negative number',
-        expected:  'Returns the sign-correct result',
+        scenario:  `${fnName} — mixed positive and negative inputs`,
+        input:     'One positive and one negative integer (e.g., a=10, b=-5)',
+        expected:  `${fnName} returns the sign-correct result`,
       },
       {
         id: 'TC-F003', type: 'Functional', priority: 'Medium',
-        scenario:  `${label} — floating-point inputs`,
-        input:     'Two floats (e.g., 1.5, 2.5)',
-        expected:  'Returns the precise floating-point result',
+        scenario:  `${fnName} — floating-point inputs`,
+        input:     isPy ? 'Two float values (e.g., a=1.5, b=2.5)'
+                       : 'Two Number values (e.g., a=1.5, b=2.5)',
+        expected:  `${fnName} returns the precise floating-point result without rounding error`,
       },
     );
   }
@@ -277,21 +485,21 @@ function mathTestCases(req, categories) {
     cases.push(
       {
         id: 'TC-N001', type: 'Negative', priority: 'High',
-        scenario:  `${label} — non-numeric string argument`,
-        input:     'A string where a number is expected',
-        expected:  'Raises TypeError or equivalent error',
+        scenario:  `${fnName} — non-numeric string passed as an argument`,
+        input:     'a="hello", b=3 (string where a number is expected)',
+        expected:  typeErr,
       },
       {
         id: 'TC-N002', type: 'Negative', priority: 'High',
-        scenario:  `${label} — None/null argument`,
-        input:     'None or null in place of a number',
-        expected:  'Raises TypeError or equivalent error',
+        scenario:  `${fnName} — ${nullVal} passed as an argument`,
+        input:     `a=${nullVal}, b=2`,
+        expected:  nullErr,
       },
       {
         id: 'TC-N003', type: 'Negative', priority: 'Medium',
-        scenario:  `${label} — wrong number of arguments`,
-        input:     'Function called with too few or too many args',
-        expected:  'Raises TypeError for missing/extra positional arguments',
+        scenario:  `${fnName} — called with wrong number of arguments`,
+        input:     `${fnName} invoked with too few or too many positional arguments`,
+        expected:  argErr,
       },
     );
   }
@@ -300,21 +508,21 @@ function mathTestCases(req, categories) {
     cases.push(
       {
         id: 'TC-B001', type: 'Boundary', priority: 'High',
-        scenario:  `${label} — zero input`,
-        input:     '0 (or 0.0)',
-        expected:  'Returns mathematically correct result for zero',
+        scenario:  `${fnName} — both arguments are zero`,
+        input:     'a=0, b=0',
+        expected:  `${fnName} returns 0 or raises a domain-specific error per business rules`,
       },
       {
         id: 'TC-B002', type: 'Boundary', priority: 'Medium',
-        scenario:  `${label} — maximum integer value`,
-        input:     'sys.maxsize or Number.MAX_SAFE_INTEGER',
-        expected:  'Returns result without overflow or precision loss',
+        scenario:  `${fnName} — maximum platform integer value`,
+        input:     maxInt,
+        expected:  maxIntExp,
       },
       {
         id: 'TC-B003', type: 'Boundary', priority: 'Medium',
-        scenario:  `${label} — very small floating-point value`,
-        input:     'sys.float_info.min or Number.MIN_VALUE',
-        expected:  'Returns result without underflow',
+        scenario:  `${fnName} — smallest positive floating-point value`,
+        input:     minFlt,
+        expected:  minFltExp,
       },
     );
   }
@@ -421,28 +629,34 @@ function loginTestCases(categories) {
  * @returns {object[]}
  */
 function formTestCases(req, categories) {
-  const label = deriveFeatureLabel(req);
+  const { action, subject, fields, feature, featureFull } = parseRequirement(req);
+  // Build a human-readable list of the detected fields (fall back to "required fields")
+  const fieldList  = fields.length > 0
+    ? fields.slice(0, 4).join(', ')
+    : 'required fields';
+  const firstField = fields.length > 0 ? fields[0] : 'name';
+  const hasEmail   = fields.includes('email');
   const cases = [];
 
   if (categories.includes('Functional')) {
     cases.push(
       {
         id: 'TC-F001', type: 'Functional', priority: 'High',
-        scenario:  `${label} — submit with all required fields valid`,
-        input:     'All mandatory fields populated with valid, properly formatted data',
-        expected:  'Form submits successfully; success confirmation shown',
+        scenario:  `${feature} — ${subject} submits with all required fields valid`,
+        input:     `All mandatory fields (${fieldList}) populated with correctly formatted values`,
+        expected:  `Form submits successfully; ${subject} receives a success confirmation`,
       },
       {
         id: 'TC-F002', type: 'Functional', priority: 'High',
-        scenario:  `${label} — optional fields left blank`,
-        input:     'Only required fields filled; optional fields empty',
-        expected:  'Form submits successfully without errors',
+        scenario:  `${feature} — optional fields omitted`,
+        input:     `Only the required fields (${fieldList}) filled; optional fields left empty`,
+        expected:  'Form submits successfully without validation errors',
       },
       {
         id: 'TC-F003', type: 'Functional', priority: 'Medium',
-        scenario:  `${label} — form is resettable`,
-        input:     'Fill in fields, then press Reset/Clear',
-        expected:  'All fields return to their default state',
+        scenario:  `${feature} — form can be reset after partial input`,
+        input:     `${subject} fills some fields then clicks Reset / Clear`,
+        expected:  'All fields revert to their default (empty) state',
       },
     );
   }
@@ -451,21 +665,31 @@ function formTestCases(req, categories) {
     cases.push(
       {
         id: 'TC-N001', type: 'Negative', priority: 'High',
-        scenario:  `${label} — submit with all required fields empty`,
-        input:     'All required fields left blank',
-        expected:  'Validation errors shown for each required field; form not submitted',
+        scenario:  `${feature} — submit with all required fields empty`,
+        input:     `All required fields (${fieldList}) left blank`,
+        expected:  `Validation error shown for each blank required field; form not submitted`,
       },
       {
         id: 'TC-N002', type: 'Negative', priority: 'High',
-        scenario:  `${label} — invalid format in a constrained field`,
-        input:     'e.g. letters in a numeric field, invalid email format',
-        expected:  'Inline validation error specifying the expected format',
+        scenario:  hasEmail
+          ? `${feature} — ${firstField} field contains an invalid format (e.g. missing "@")`
+          : `${feature} — ${firstField} field contains an invalid format`,
+        input:     hasEmail
+          ? `${firstField}: "notanemail" (missing "@" and domain)`
+          : `${firstField}: letters entered in a numeric-only field`,
+        expected:  `Inline validation error on the ${firstField} field specifying the required format`,
       },
       {
         id: 'TC-N003', type: 'Negative', priority: 'Medium',
-        scenario:  `${label} — XSS attempt in a text field`,
-        input:     '<script>alert(1)</script>',
-        expected:  'Input sanitised; script tag not executed; form may reject or escape the value',
+        scenario:  `${feature} — XSS payload injected into a text field`,
+        input:     `${firstField}: "<script>alert('xss')</script>"`,
+        expected:  'Input sanitised or rejected; script tag is not executed; no alert fires',
+      },
+      {
+        id: 'TC-N004', type: 'Negative', priority: 'Medium',
+        scenario:  `${feature} — SQL injection attempt in a text field`,
+        input:     `${firstField}: "' OR '1'='1' --"`,
+        expected:  'Input rejected or sanitised; no database error exposed; form submission blocked',
       },
     );
   }
@@ -474,21 +698,27 @@ function formTestCases(req, categories) {
     cases.push(
       {
         id: 'TC-B001', type: 'Boundary', priority: 'High',
-        scenario:  `${label} — text field at minimum allowed length`,
-        input:     'Value exactly at the minimum character limit',
-        expected:  'Field accepted; form submits if all other fields are valid',
+        scenario:  `${feature} — ${firstField} field at exactly the minimum allowed length`,
+        input:     `${firstField}: string of exactly the minimum character count (e.g. 1 char)`,
+        expected:  'Field accepted; form submits successfully if all other fields are valid',
       },
       {
         id: 'TC-B002', type: 'Boundary', priority: 'High',
-        scenario:  `${label} — text field at maximum allowed length`,
-        input:     'Value exactly at the maximum character limit',
-        expected:  'Field accepted; form submits if all other fields are valid',
+        scenario:  `${feature} — ${firstField} field at exactly the maximum allowed length`,
+        input:     `${firstField}: string of exactly the maximum character count`,
+        expected:  'Field accepted; form submits successfully if all other fields are valid',
       },
       {
         id: 'TC-B003', type: 'Boundary', priority: 'High',
-        scenario:  `${label} — text field one character over the maximum`,
-        input:     'Value with max+1 characters',
-        expected:  'Validation error or input truncated; excess character rejected',
+        scenario:  `${feature} — ${firstField} field one character over the maximum`,
+        input:     `${firstField}: string of maximum + 1 characters`,
+        expected:  'Validation error shown or input truncated; excess character rejected',
+      },
+      {
+        id: 'TC-B004', type: 'Boundary', priority: 'Medium',
+        scenario:  `${feature} — ${firstField} field contains only whitespace`,
+        input:     `${firstField}: "   " (spaces only)`,
+        expected:  'Treated as empty after trimming; validation error shown',
       },
     );
   }
@@ -591,34 +821,53 @@ function apiTestCases(req, categories) {
 }
 
 /**
- * Generic (domain-unknown) test cases — clearly labelled as such.
+ * Builds test cases for a search / filter feature.
  * @param {string}   req
  * @param {string[]} categories
  * @returns {object[]}
  */
-function genericTestCases(req, categories) {
-  const label = deriveFeatureLabel(req);
+function searchTestCases(req, categories) {
+  const { subject, feature, fields } = parseRequirement(req);
+  // Detect what is being searched (product, user, article, etc.)
+  const t = req.toLowerCase();
+  let entity = 'results';
+  if (/product/.test(t))     entity = 'products';
+  else if (/user/.test(t))   entity = 'users';
+  else if (/article/.test(t)) entity = 'articles';
+  else if (/order/.test(t))  entity = 'orders';
+  else if (/item/.test(t))   entity = 'items';
+
+  const queryField = fields.includes('keyword') ? 'keyword'
+    : fields.includes('query')   ? 'query'
+    : 'search term';
+
   const cases = [];
 
   if (categories.includes('Functional')) {
     cases.push(
       {
         id: 'TC-F001', type: 'Functional', priority: 'High',
-        scenario:  `Verify that the feature fulfils the stated requirement: "${label}"`,
-        input:     'Valid, expected inputs as described in the requirement',
-        expected:  'The feature behaves as described; correct output is returned',
+        scenario:  `${feature} — ${subject} searches with a valid ${queryField} that matches existing ${entity}`,
+        input:     `${queryField}: a known value that exists in the data set`,
+        expected:  `Matching ${entity} are returned; results list is not empty`,
       },
       {
         id: 'TC-F002', type: 'Functional', priority: 'High',
-        scenario:  'All required inputs or parameters are accepted correctly',
-        input:     'All mandatory fields/params populated with valid data',
-        expected:  'No validation errors; feature executes successfully end-to-end',
+        scenario:  `${feature} — search is case-insensitive`,
+        input:     `${queryField}: same term entered in ALL CAPS and all lowercase`,
+        expected:  `Both queries return identical ${entity}; case does not affect results`,
       },
       {
         id: 'TC-F003', type: 'Functional', priority: 'Medium',
-        scenario:  'Feature produces consistent output on repeated calls with same input',
-        input:     'Same valid input submitted twice',
-        expected:  'Both calls return identical, correct results',
+        scenario:  `${feature} — ${subject} searches with a ${queryField} that matches no ${entity}`,
+        input:     `${queryField}: a value known not to exist in the data set`,
+        expected:  `Empty results list displayed; "No ${entity} found" message shown`,
+      },
+      {
+        id: 'TC-F004', type: 'Functional', priority: 'Medium',
+        scenario:  `${feature} — results are sorted or ranked correctly`,
+        input:     `${queryField}: a value that returns multiple matching ${entity}`,
+        expected:  `${entity} are ordered by relevance / default sort; order is consistent`,
       },
     );
   }
@@ -627,21 +876,21 @@ function genericTestCases(req, categories) {
     cases.push(
       {
         id: 'TC-N001', type: 'Negative', priority: 'High',
-        scenario:  'Submit empty / missing input where data is required',
-        input:     'No input provided; all fields blank or null',
-        expected:  'Appropriate validation error raised; operation does not execute',
+        scenario:  `${feature} — ${subject} submits an empty ${queryField}`,
+        input:     `${queryField}: "" (empty string)`,
+        expected:  `Validation error shown: "${queryField} is required" or all ${entity} returned per spec`,
       },
       {
         id: 'TC-N002', type: 'Negative', priority: 'High',
-        scenario:  'Submit data of an unexpected type',
-        input:     'Wrong data type (e.g., string where integer expected)',
-        expected:  'TypeError or equivalent; clear error message',
+        scenario:  `${feature} — ${queryField} contains only whitespace`,
+        input:     `${queryField}: "   " (spaces only)`,
+        expected:  'Treated as empty input after trimming; validation error shown',
       },
       {
         id: 'TC-N003', type: 'Negative', priority: 'Medium',
-        scenario:  'Inject special characters or script tags into a text input',
-        input:     "<script>alert('xss')</script> or ' OR 1=1 --",
-        expected:  'Input sanitised or rejected; no unintended execution',
+        scenario:  `${feature} — ${queryField} contains special characters / script injection`,
+        input:     `${queryField}: "<script>alert(1)</script>" or "' OR 1=1 --"`,
+        expected:  'Input sanitised; no script executed; search returns empty or safe results',
       },
     );
   }
@@ -650,27 +899,437 @@ function genericTestCases(req, categories) {
     cases.push(
       {
         id: 'TC-B001', type: 'Boundary', priority: 'High',
-        scenario:  'Input at the minimum acceptable value',
-        input:     'Value at the documented lower boundary (e.g., 0, 1, "" with min-length 0)',
-        expected:  'Feature accepts and processes the minimum correctly',
+        scenario:  `${feature} — ${queryField} at exactly 1 character (minimum)`,
+        input:     `${queryField}: single character (e.g. "a")`,
+        expected:  `Search executes; ${entity} matching that character are returned`,
       },
       {
         id: 'TC-B002', type: 'Boundary', priority: 'High',
-        scenario:  'Input at the maximum acceptable value',
-        input:     'Value at the documented upper boundary (e.g., max int, max length string)',
-        expected:  'Feature accepts and processes the maximum correctly',
+        scenario:  `${feature} — ${queryField} at the maximum allowed length`,
+        input:     `${queryField}: string of exactly the maximum character limit`,
+        expected:  `Search executes without error; matching ${entity} returned`,
       },
       {
-        id: 'TC-B003', type: 'Boundary', priority: 'High',
-        scenario:  'Input one step beyond the maximum boundary',
-        input:     'Value just above the documented upper limit',
-        expected:  'Feature rejects the value with a clear boundary-violation error',
+        id: 'TC-B003', type: 'Boundary', priority: 'Medium',
+        scenario:  `${feature} — ${queryField} one character over the maximum length`,
+        input:     `${queryField}: string of maximum + 1 characters`,
+        expected:  `Validation error shown: "${queryField} is too long"; search not executed`,
       },
       {
         id: 'TC-B004', type: 'Boundary', priority: 'Medium',
-        scenario:  'Input at exactly zero (if numeric)',
-        input:     '0 or 0.0',
-        expected:  'Feature handles zero gracefully (accepts or rejects per business rules)',
+        scenario:  `${feature} — results page number at zero or negative value`,
+        input:     'page=0 or page=-1',
+        expected:  '400 Bad Request or first page returned, depending on API spec',
+      },
+    );
+  }
+
+  return cases;
+}
+
+/**
+ * Builds test cases for a file upload feature.
+ * @param {string}   req
+ * @param {string[]} categories
+ * @returns {object[]}
+ */
+function uploadTestCases(req, categories) {
+  const { subject, feature } = parseRequirement(req);
+  const t = req.toLowerCase();
+
+  // Detect accepted file types from the requirement
+  let fileType = 'file';
+  if (/image|photo|picture|png|jpg|jpeg/.test(t)) fileType = 'image file (PNG/JPG)';
+  else if (/pdf/.test(t))                          fileType = 'PDF document';
+  else if (/csv/.test(t))                          fileType = 'CSV file';
+  else if (/video|mp4/.test(t))                    fileType = 'video file';
+  else if (/document|docx|xlsx/.test(t))           fileType = 'document file';
+
+  const cases = [];
+
+  if (categories.includes('Functional')) {
+    cases.push(
+      {
+        id: 'TC-F001', type: 'Functional', priority: 'High',
+        scenario:  `${feature} — ${subject} uploads a valid ${fileType} within size limits`,
+        input:     `A valid ${fileType} within the allowed size limit`,
+        expected:  'File uploads successfully; confirmation message shown; file stored correctly',
+      },
+      {
+        id: 'TC-F002', type: 'Functional', priority: 'High',
+        scenario:  `${feature} — uploaded ${fileType} is retrievable after upload`,
+        input:     `A valid ${fileType} that has been uploaded`,
+        expected:  `The ${fileType} can be retrieved / previewed at the returned URL or reference`,
+      },
+      {
+        id: 'TC-F003', type: 'Functional', priority: 'Medium',
+        scenario:  `${feature} — upload progress indicator is displayed`,
+        input:     `A large valid ${fileType} (close to size limit)`,
+        expected:  'Upload progress is visibly indicated; completion status shown on finish',
+      },
+    );
+  }
+
+  if (categories.includes('Negative')) {
+    cases.push(
+      {
+        id: 'TC-N001', type: 'Negative', priority: 'High',
+        scenario:  `${feature} — ${subject} uploads a file of an unsupported type`,
+        input:     'A file with a disallowed extension (e.g. .exe, .bat, .php)',
+        expected:  'Upload rejected; error message specifying allowed file types shown',
+      },
+      {
+        id: 'TC-N002', type: 'Negative', priority: 'High',
+        scenario:  `${feature} — ${subject} uploads a file exceeding the maximum size`,
+        input:     `A ${fileType} larger than the allowed size limit`,
+        expected:  'Upload rejected; error message specifying the maximum allowed size shown',
+      },
+      {
+        id: 'TC-N003', type: 'Negative', priority: 'High',
+        scenario:  `${feature} — ${subject} submits without selecting a file`,
+        input:     'No file chosen; upload button clicked',
+        expected:  'Validation error: "Please select a file to upload"',
+      },
+      {
+        id: 'TC-N004', type: 'Negative', priority: 'Medium',
+        scenario:  `${feature} — ${subject} uploads a corrupt or malformed file`,
+        input:     `A ${fileType} with corrupted content (invalid headers or truncated data)`,
+        expected:  'Upload rejected or processing fails gracefully; error message shown; server not crashed',
+      },
+    );
+  }
+
+  if (categories.includes('Boundary')) {
+    cases.push(
+      {
+        id: 'TC-B001', type: 'Boundary', priority: 'High',
+        scenario:  `${feature} — ${fileType} at exactly the maximum allowed file size`,
+        input:     `A valid ${fileType} whose size is exactly the documented limit (e.g. 5 MB)`,
+        expected:  'File accepted and uploaded successfully',
+      },
+      {
+        id: 'TC-B002', type: 'Boundary', priority: 'High',
+        scenario:  `${feature} — ${fileType} one byte above the maximum allowed size`,
+        input:     `A ${fileType} whose size is max limit + 1 byte`,
+        expected:  'Upload rejected; size-limit error message displayed',
+      },
+      {
+        id: 'TC-B003', type: 'Boundary', priority: 'Medium',
+        scenario:  `${feature} — zero-byte (empty) ${fileType}`,
+        input:     'A file with 0 bytes of content',
+        expected:  'Upload rejected or treated as invalid; error message shown',
+      },
+      {
+        id: 'TC-B004', type: 'Boundary', priority: 'Medium',
+        scenario:  `${feature} — filename at the maximum allowed length`,
+        input:     'A valid file whose filename is exactly 255 characters long',
+        expected:  'File accepted; filename stored without truncation or error',
+      },
+    );
+  }
+
+  return cases;
+}
+
+/**
+ * Builds test cases for a payment / checkout feature.
+ * @param {string}   req
+ * @param {string[]} categories
+ * @returns {object[]}
+ */
+function paymentTestCases(req, categories) {
+  const { subject, feature } = parseRequirement(req);
+  const t = req.toLowerCase();
+  const hasCard = /credit\s*card|debit\s*card|card\s*number/.test(t);
+  const payMethod = hasCard ? 'credit/debit card' : 'payment method';
+  const cases = [];
+
+  if (categories.includes('Functional')) {
+    cases.push(
+      {
+        id: 'TC-F001', type: 'Functional', priority: 'High',
+        scenario:  `${feature} — ${subject} completes payment with a valid ${payMethod}`,
+        input:     hasCard
+          ? 'card number: valid test card, expiry: future date, CVV: valid 3-digit code, billing address: valid'
+          : 'All payment fields filled with valid, accepted values',
+        expected:  'Payment processed successfully; confirmation page and email sent; order status updated to "Paid"',
+      },
+      {
+        id: 'TC-F002', type: 'Functional', priority: 'High',
+        scenario:  `${feature} — payment total is calculated correctly before submission`,
+        input:     `${subject} proceeds to ${feature.toLowerCase()} with a known order total`,
+        expected:  'Displayed total matches expected amount including taxes and shipping',
+      },
+      {
+        id: 'TC-F003', type: 'Functional', priority: 'Medium',
+        scenario:  `${feature} — ${subject} receives payment confirmation`,
+        input:     'Successful payment completed with valid credentials',
+        expected:  'On-screen confirmation shown; order ID provided; confirmation email delivered',
+      },
+    );
+  }
+
+  if (categories.includes('Negative')) {
+    cases.push(
+      {
+        id: 'TC-N001', type: 'Negative', priority: 'High',
+        scenario:  hasCard
+          ? `${feature} — ${subject} enters an expired card`
+          : `${feature} — ${subject} submits with invalid payment credentials`,
+        input:     hasCard
+          ? 'card number: valid format, expiry: past date (e.g. 01/22), CVV: valid'
+          : 'Payment credentials that are known to be invalid or declined',
+        expected:  'Payment declined; error message: "Card has expired" or "Payment declined"; order not placed',
+      },
+      {
+        id: 'TC-N002', type: 'Negative', priority: 'High',
+        scenario:  hasCard
+          ? `${feature} — ${subject} enters an invalid card number`
+          : `${feature} — ${subject} submits with missing required payment fields`,
+        input:     hasCard
+          ? 'card number: "1234567890123456" (fails Luhn check)'
+          : 'One or more required payment fields left blank',
+        expected:  'Client-side validation error shown; payment not attempted',
+      },
+      {
+        id: 'TC-N003', type: 'Negative', priority: 'High',
+        scenario:  `${feature} — payment is submitted with insufficient funds`,
+        input:     'Payment method known to have insufficient balance (use declined test card)',
+        expected:  'Payment declined; error message shown; order not placed; no duplicate charge',
+      },
+      {
+        id: 'TC-N004', type: 'Negative', priority: 'Medium',
+        scenario:  `${feature} — ${subject} attempts double-submission by clicking pay twice`,
+        input:     'Pay button clicked twice in quick succession',
+        expected:  'Only one payment processed; duplicate charge prevented; idempotency enforced',
+      },
+    );
+  }
+
+  if (categories.includes('Boundary')) {
+    cases.push(
+      {
+        id: 'TC-B001', type: 'Boundary', priority: 'High',
+        scenario:  `${feature} — payment amount of exactly $0.01 (minimum)`,
+        input:     'Order total: $0.01',
+        expected:  'Payment accepted; minimum amount processed without error',
+      },
+      {
+        id: 'TC-B002', type: 'Boundary', priority: 'High',
+        scenario:  `${feature} — payment amount at the maximum allowed limit`,
+        input:     'Order total: at the documented maximum transaction amount',
+        expected:  'Payment accepted; amount processed correctly',
+      },
+      {
+        id: 'TC-B003', type: 'Boundary', priority: 'Medium',
+        scenario:  hasCard
+          ? `${feature} — card expiry is exactly the current month and year`
+          : `${feature} — payment credentials valid only on the current boundary date`,
+        input:     hasCard
+          ? 'card expiry: current month / current year (e.g. 11/26)'
+          : 'Credentials valid on the boundary date',
+        expected:  'Payment accepted; card treated as not yet expired',
+      },
+      {
+        id: 'TC-B004', type: 'Boundary', priority: 'Medium',
+        scenario:  `${feature} — zero-value order total`,
+        input:     'Order total: $0.00',
+        expected:  'Zero-value order handled per business rules (free checkout or blocked)',
+      },
+    );
+  }
+
+  return cases;
+}
+
+/**
+ * Builds test cases for a password-reset / forgot-password flow.
+ * @param {string}   req
+ * @param {string[]} categories
+ * @returns {object[]}
+ */
+function passwordResetTestCases(req, categories) {
+  const { subject, feature } = parseRequirement(req);
+  const cases = [];
+
+  if (categories.includes('Functional')) {
+    cases.push(
+      {
+        id: 'TC-F001', type: 'Functional', priority: 'High',
+        scenario:  `${feature} — ${subject} requests a reset link with a registered email`,
+        input:     'email: "registered@example.com"',
+        expected:  'Password-reset email sent to the registered address; success message shown',
+      },
+      {
+        id: 'TC-F002', type: 'Functional', priority: 'High',
+        scenario:  `${feature} — ${subject} sets a new password using a valid reset token`,
+        input:     'Valid, unexpired reset token; new password: "NewP@ss123" (meets policy)',
+        expected:  `Password updated successfully; ${subject} can log in with the new password`,
+      },
+      {
+        id: 'TC-F003', type: 'Functional', priority: 'Medium',
+        scenario:  `${feature} — old password is invalidated after reset`,
+        input:     'Log-in attempt using the previous password after a successful reset',
+        expected:  'Login rejected; error: "Invalid email or password"',
+      },
+    );
+  }
+
+  if (categories.includes('Negative')) {
+    cases.push(
+      {
+        id: 'TC-N001', type: 'Negative', priority: 'High',
+        scenario:  `${feature} — ${subject} requests reset with an unregistered email`,
+        input:     'email: "unknown@example.com"',
+        expected:  'Generic success message shown (do not reveal whether email exists); no reset email sent',
+      },
+      {
+        id: 'TC-N002', type: 'Negative', priority: 'High',
+        scenario:  `${feature} — ${subject} uses an expired reset token`,
+        input:     'Reset token that is past its expiry time (e.g. older than 1 hour)',
+        expected:  `Error: "Reset link has expired"; ${subject} prompted to request a new one`,
+      },
+      {
+        id: 'TC-N003', type: 'Negative', priority: 'High',
+        scenario:  `${feature} — ${subject} uses a previously used (single-use) reset token`,
+        input:     'Reset token that was already consumed',
+        expected:  'Error: "Reset link is no longer valid"; token cannot be reused',
+      },
+      {
+        id: 'TC-N004', type: 'Negative', priority: 'Medium',
+        scenario:  `${feature} — new password does not meet the complexity policy`,
+        input:     'new password: "password" (no uppercase, no special character, too common)',
+        expected:  'Validation error listing the unmet password policy requirements; password not changed',
+      },
+    );
+  }
+
+  if (categories.includes('Boundary')) {
+    cases.push(
+      {
+        id: 'TC-B001', type: 'Boundary', priority: 'High',
+        scenario:  `${feature} — new password at exactly the minimum allowed length`,
+        input:     'new password: exactly the minimum number of characters (e.g. 8)',
+        expected:  'Password accepted if it meets all other policy rules',
+      },
+      {
+        id: 'TC-B002', type: 'Boundary', priority: 'High',
+        scenario:  `${feature} — new password one character below the minimum length`,
+        input:     'new password: minimum - 1 characters (e.g. 7 chars)',
+        expected:  'Validation error: "Password must be at least 8 characters"',
+      },
+      {
+        id: 'TC-B003', type: 'Boundary', priority: 'Medium',
+        scenario:  `${feature} — new password at exactly the maximum allowed length`,
+        input:     'new password: exactly the maximum character limit (e.g. 128 chars)',
+        expected:  'Password accepted; no truncation',
+      },
+      {
+        id: 'TC-B004', type: 'Boundary', priority: 'Medium',
+        scenario:  `${feature} — reset token used at exactly 1 second before expiry`,
+        input:     'Reset token used at expiry_time - 1 second',
+        expected:  'Token still valid; password reset succeeds',
+      },
+    );
+  }
+
+  return cases;
+}
+
+/**
+ * Generic (domain-unknown) test cases — derived from parsed requirement terminology.
+ * @param {string}   req
+ * @param {string[]} categories
+ * @returns {object[]}
+ */
+function genericTestCases(req, categories) {
+  const { action, subject, fields, feature, featureFull } = parseRequirement(req);
+
+  // Build concrete input descriptions from detected fields
+  const hasFields  = fields.length > 0;
+  const fieldList  = hasFields ? fields.slice(0, 4).join(', ') : 'the required inputs';
+  const firstField = hasFields ? fields[0] : 'input';
+  const inputDesc  = hasFields
+    ? `${fieldList} populated with valid, correctly formatted values`
+    : 'all required inputs provided with valid values as described in the requirement';
+
+  const cases = [];
+
+  if (categories.includes('Functional')) {
+    cases.push(
+      {
+        id: 'TC-F001', type: 'Functional', priority: 'High',
+        scenario:  `${feature} — ${subject} can ${action} successfully with valid input`,
+        input:     inputDesc,
+        expected:  `${subject} successfully ${action}s; correct output is produced as described in the requirement`,
+      },
+      {
+        id: 'TC-F002', type: 'Functional', priority: 'High',
+        scenario:  `${feature} — all ${hasFields ? fieldList : 'required fields'} are accepted and processed correctly`,
+        input:     `${hasFields ? fieldList : 'All required fields'} filled with valid, correctly typed data`,
+        expected:  `No validation errors; ${action} completes successfully end-to-end`,
+      },
+      {
+        id: 'TC-F003', type: 'Functional', priority: 'Medium',
+        scenario:  `${feature} — repeating the ${action} with the same input produces consistent results`,
+        input:     `${subject} performs the ${action} twice with identical valid input`,
+        expected:  'Both attempts produce identical, correct results; no unintended side effects',
+      },
+    );
+  }
+
+  if (categories.includes('Negative')) {
+    cases.push(
+      {
+        id: 'TC-N001', type: 'Negative', priority: 'High',
+        scenario:  `${feature} — ${subject} attempts to ${action} with ${hasFields ? `the ${firstField} field` : 'required input'} empty`,
+        input:     hasFields ? `${firstField}: "" (empty string)` : 'All required fields left blank',
+        expected:  `Validation error shown: "${firstField} is required"; ${action} not executed`,
+      },
+      {
+        id: 'TC-N002', type: 'Negative', priority: 'High',
+        scenario:  `${feature} — ${subject} provides an incorrectly typed value for ${hasFields ? firstField : 'a required field'}`,
+        input:     hasFields
+          ? `${firstField}: a value of the wrong data type (e.g. number where text expected, or vice versa)`
+          : 'A required field receives a value of the wrong data type',
+        expected:  `Type-mismatch or format validation error shown; ${action} not executed`,
+      },
+      {
+        id: 'TC-N003', type: 'Negative', priority: 'Medium',
+        scenario:  `${feature} — malicious input injected into ${hasFields ? `the ${firstField} field` : 'a text field'}`,
+        input:     hasFields
+          ? `${firstField}: "<script>alert('xss')</script>" or "' OR 1=1 --"`
+          : "<script>alert('xss')</script> or ' OR 1=1 --",
+        expected:  'Input sanitised or rejected; script not executed; no database error exposed',
+      },
+    );
+  }
+
+  if (categories.includes('Boundary')) {
+    cases.push(
+      {
+        id: 'TC-B001', type: 'Boundary', priority: 'High',
+        scenario:  `${feature} — ${hasFields ? firstField : 'text input'} at exactly the minimum allowed length`,
+        input:     `${hasFields ? firstField : 'Input'}: string of exactly the minimum character count (e.g. 1 char)`,
+        expected:  `${firstField || 'Input'} accepted; ${action} proceeds if all other conditions are met`,
+      },
+      {
+        id: 'TC-B002', type: 'Boundary', priority: 'High',
+        scenario:  `${feature} — ${hasFields ? firstField : 'text input'} at exactly the maximum allowed length`,
+        input:     `${hasFields ? firstField : 'Input'}: string of exactly the maximum character count`,
+        expected:  `${firstField || 'Input'} accepted; ${action} proceeds if all other conditions are met`,
+      },
+      {
+        id: 'TC-B003', type: 'Boundary', priority: 'High',
+        scenario:  `${feature} — ${hasFields ? firstField : 'text input'} one character over the maximum`,
+        input:     `${hasFields ? firstField : 'Input'}: string of maximum + 1 characters`,
+        expected:  `Validation error shown; excess input rejected; ${action} not executed`,
+      },
+      {
+        id: 'TC-B004', type: 'Boundary', priority: 'Medium',
+        scenario:  `${feature} — ${hasFields ? firstField : 'input'} contains only whitespace`,
+        input:     `${hasFields ? firstField : 'Input'}: "   " (spaces only)`,
+        expected:  'Treated as empty after trimming; validation error shown',
       },
     );
   }
@@ -686,22 +1345,27 @@ function genericTestCases(req, categories) {
  * Synchronously generate test cases using rule-based domain detection.
  * @param {string}   requirement
  * @param {string[]} categories
- * @returns {{ cases: object[], mode: string }}
+ * @returns {{ cases: object[], mode: string, domain: string, lang: string }}
  */
 function generateRuleBased(requirement, categories) {
   const domain = detectDomain(requirement);
+  const lang   = detectLanguage(requirement);   // 'python' | 'javascript' | 'natural'
 
   let cases;
   switch (domain) {
-    case 'division': cases = divisionTestCases(categories);            break;
-    case 'math':     cases = mathTestCases(requirement, categories);   break;
-    case 'login':    cases = loginTestCases(categories);               break;
-    case 'form':     cases = formTestCases(requirement, categories);   break;
-    case 'api':      cases = apiTestCases(requirement, categories);    break;
-    default:         cases = genericTestCases(requirement, categories);
+    case 'division':      cases = divisionTestCases(categories, lang);                    break;
+    case 'math':          cases = mathTestCases(requirement, categories, lang);           break;
+    case 'login':         cases = loginTestCases(categories);                             break;
+    case 'form':          cases = formTestCases(requirement, categories);                 break;
+    case 'api':           cases = apiTestCases(requirement, categories);                  break;
+    case 'search':        cases = searchTestCases(requirement, categories);               break;
+    case 'upload':        cases = uploadTestCases(requirement, categories);               break;
+    case 'payment':       cases = paymentTestCases(requirement, categories);              break;
+    case 'passwordReset': cases = passwordResetTestCases(requirement, categories);        break;
+    default:              cases = genericTestCases(requirement, categories);
   }
 
-  return { cases, mode: 'rule-based', domain };
+  return { cases, mode: 'rule-based', domain, lang };
 }
 
 // ============================================================
@@ -781,8 +1445,9 @@ function deriveFeatureLabel(req) {
  * Show or update the generation-mode info banner.
  * @param {'llm'|'rule-based'} mode
  * @param {string}             [domain]  - Detected domain tag (rule-based only)
+ * @param {string}             [lang]    - Detected language (rule-based only)
  */
-function setModeBanner(mode, domain) {
+function setModeBanner(mode, domain, lang) {
   let banner = document.getElementById('generation-mode-banner');
 
   if (!banner) {
@@ -790,22 +1455,43 @@ function setModeBanner(mode, domain) {
     banner.id = 'generation-mode-banner';
     banner.style.cssText =
       'margin-bottom:1rem;padding:0.4rem 0.9rem;border-radius:4px;' +
-      'font-size:0.8125rem;font-weight:500;border:1px solid;';
+      'font-size:0.8125rem;font-weight:400;border:1px solid;';
 
     const header = document.querySelector('#results-section .results-header');
     if (header) header.after(banner);
   }
 
   if (mode === 'llm') {
-    banner.textContent = '✦ Generated by AI (LLM)';
+    banner.textContent = 'Generated by AI (LLM)';
     banner.style.background  = '#eff6ff';
     banner.style.color       = '#1d4ed8';
     banner.style.borderColor = '#bfdbfe';
   } else {
-    const domainLabel = domain && domain !== 'generic'
-      ? ` — domain detected: ${domain}`
-      : ' — no specific domain detected; using general templates';
-    banner.textContent = `⚙ Rule-based generation (no LLM configured)${domainLabel}`;
+    // Build a concise, non-distracting status line
+    const domainMap = {
+      division:      'Division',
+      math:          'Math function',
+      login:         'Authentication',
+      form:          'Form / Registration',
+      api:           'REST API',
+      search:        'Search / Filter',
+      upload:        'File Upload',
+      payment:       'Payment / Checkout',
+      passwordReset: 'Password Reset',
+      generic:       'General',
+    };
+    const langMap = {
+      python:      'Python',
+      javascript:  'JavaScript',
+      natural:     null,          // don't mention language for prose requirements
+    };
+    const domainLabel = domainMap[domain] || 'General';
+    const langLabel   = langMap[lang]     || null;
+
+    const parts = [`${domainLabel} test cases`];
+    if (langLabel) parts.push(langLabel);
+    banner.textContent = parts.join(' · ');
+
     banner.style.background  = '#f8fafc';
     banner.style.color       = '#57606a';
     banner.style.borderColor = '#d0d7de';
@@ -821,8 +1507,9 @@ function setModeBanner(mode, domain) {
  * @param {object[]} testCases
  * @param {'llm'|'rule-based'} mode
  * @param {string}  [domain]
+ * @param {string}  [lang]
  */
-function renderResults(testCases, mode, domain) {
+function renderResults(testCases, mode, domain, lang) {
   const tbody   = document.getElementById('results-body');
   const section = document.getElementById('results-section');
   const countEl = document.getElementById('results-count');
@@ -834,7 +1521,7 @@ function renderResults(testCases, mode, domain) {
   countEl.textContent =
     `${testCases.length} test case${testCases.length !== 1 ? 's' : ''} generated`;
   setVisible(section, true);
-  setModeBanner(mode, domain);
+  setModeBanner(mode, domain, lang);
 
   btnCopy.disabled = false;
   btnCopy.removeAttribute('aria-disabled');
@@ -910,8 +1597,8 @@ async function handleGenerate() {
       renderResults(llmCases, 'llm');
     } else {
       // 2. Fall back to rule-based generation
-      const { cases, mode, domain } = generateRuleBased(requirement, categories);
-      renderResults(cases, mode, domain);
+      const { cases, mode, domain, lang } = generateRuleBased(requirement, categories);
+      renderResults(cases, mode, domain, lang);
     }
   } finally {
     btnGenerate.disabled    = false;
