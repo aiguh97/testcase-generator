@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Test Case Generator</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="site-header">
+    <div class="container">
+      <h1 class="site-title">AI Test Case Generator</h1>
+      <p class="site-subtitle">Generate structured software test cases from feature requirements.</p>
+    </div>
+  </header>
+
+  <main class="container" id="main-content">
+    <section class="card input-section" aria-label="Test case input">
+      <h2 class="section-title">1. Enter Requirement</h2>
+      <label for="requirement" class="form-label">
+        Feature or Requirement <span class="required" aria-hidden="true">*</span>
+      </label>
+      <textarea
+        id="requirement"
+        class="form-textarea"
+        rows="5"
+        placeholder='e.g. "Users must be able to log in using an email address and password."'
+        aria-required="true"
+        aria-describedby="requirement-hint validation-msg"
+      ></textarea>
+      <p id="requirement-hint" class="form-hint">Describe the feature clearly for better test case generation.</p>
+      <p id="validation-msg" class="validation-msg" role="alert" aria-live="polite" hidden></p>
+    </section>
+
+    <section class="card category-section" aria-label="Test categories">
+      <h2 class="section-title">2. Select Test Categories</h2>
+      <p class="form-hint">Select one or more categories to generate.</p>
+      <div class="checkbox-group" role="group" aria-label="Test categories">
+        <label class="checkbox-label">
+          <input type="checkbox" id="cat-functional" name="category" value="Functional" checked />
+          <span class="checkbox-text">Functional</span>
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" id="cat-negative" name="category" value="Negative" />
+          <span class="checkbox-text">Negative</span>
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" id="cat-boundary" name="category" value="Boundary" />
+          <span class="checkbox-text">Boundary</span>
+        </label>
+      </div>
+    </section>
+
+    <section class="card action-section" aria-label="Actions">
+      <h2 class="section-title">3. Generate</h2>
+      <div class="button-row">
+        <button id="btn-generate" class="btn btn-primary" type="button">Generate Test Cases</button>
+        <button id="btn-clear" class="btn btn-secondary" type="button">Clear</button>
+        <button id="btn-copy" class="btn btn-secondary" type="button" aria-disabled="true" disabled>Copy Results</button>
+      </div>
+    </section>
+
+    <section class="results-section" id="results-section" aria-label="Generated test cases" hidden>
+      <div class="results-header">
+        <h2 class="section-title">Test Cases</h2>
+        <span id="results-count" class="results-count"></span>
+      </div>
+      <div class="table-wrapper" role="region" aria-label="Test cases table" tabindex="0">
+        <table class="results-table" id="results-table">
+          <thead>
+            <tr>
+              <th scope="col">ID</th>
+              <th scope="col">Scenario</th>
+              <th scope="col">Type</th>
+              <th scope="col">Test Input</th>
+              <th scope="col">Expected Result</th>
+              <th scope="col">Priority</th>
+            </tr>
+          </thead>
+          <tbody id="results-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container">
+      <p>&copy; 2025 AI Test Case Generator — static tool, runs entirely in your browser.</p>
+    </div>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>
